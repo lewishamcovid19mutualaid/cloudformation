@@ -1,0 +1,182 @@
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'creates basic vpc with subnets'
+
+Parameters:
+  ecsAMI:
+    Description: "ECS-Optimized AMI ID"
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
+    Default: "/aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id"
+
+
+Resources:
+
+
+  discourseFileSystemSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'To allow discourse instance access to efs'
+      VpcId:
+        Fn::ImportValue: covid-vpc-VPCID
+      SecurityGroupIngress:
+        -
+          IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref discourseSG
+
+  discourseFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: false
+      PerformanceMode: 'generalPurpose'
+      FileSystemTags:
+        -
+         Key: project
+         Value: lewisham-covid
+
+  discourseFileSystemMountTargetA:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref discourseFileSystem
+      SecurityGroups:
+      - !Ref discourseFileSystemSG
+      SubnetId:
+        Fn::ImportValue: covid-vpc-publicA
+
+  discourseFileSystemMountTargetB:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref discourseFileSystem
+      SecurityGroups:
+      - !Ref discourseFileSystemSG
+      SubnetId:
+        Fn::ImportValue: covid-vpc-publicB
+
+  discourseScaling:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: '0'
+        MaxBatchSize: '1'
+        PauseTime: 'PT4M'
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref launchConfig
+        Version: !GetAtt launchConfig.LatestVersionNumber
+      MinSize: '1'
+      MaxSize: '1'
+      VPCZoneIdentifier:
+        - Fn::ImportValue: covid-vpc-publicA
+        - Fn::ImportValue: covid-vpc-publicB
+      TerminationPolicies:
+        - 'OldestInstance'
+      Tags:
+        -
+          Key: project
+          Value: lewisham-covid
+          PropagateAtLaunch: true
+
+
+  launchConfig:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref ecsAMI
+        KeyName: 'kj'
+        InstanceType: 't3a.medium'
+        CreditSpecification:
+          CpuCredits: 'standard'
+        IamInstanceProfile:
+          Arn: !GetAtt ecsInstanceProfile.Arn
+        Monitoring:
+          Enabled: 'false'
+        SecurityGroupIds:
+          - !GetAtt webSG.GroupId
+          - !GetAtt discourseSG.GroupId
+        InstanceMarketOptions:
+          MarketType: 'spot'
+          SpotOptions:
+            MaxPrice: '0.037'
+        UserData:
+          Fn::Base64:
+             !Sub |
+              #!/bin/bash -xe
+              yum update -y
+              yum install awscli nfs-utils -y
+              yum install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm
+              mkdir -p /mnt/efs
+              echo "${discourseFileSystem}.efs.${AWS::Region}.amazonaws.com:/ /mnt/efs nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 0 0" >> /etc/fstab
+              mount /mnt/efs
+
+  discourseSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: discourse
+      GroupName: discourse     
+      VpcId:
+        Fn::ImportValue: covid-vpc-VPCID
+
+  webSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Web server
+      GroupName: web     
+      VpcId:
+        Fn::ImportValue: covid-vpc-VPCID
+      SecurityGroupIngress:
+        -
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        -
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        -
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 80.5.29.217/32
+
+
+  ecsInstanceProfileRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role'
+        - 'arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore'
+        - 'arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          -
+            Effect: 'Allow'
+            Principal:
+              Service:
+                - 'ec2.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+
+  ecsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: 
+        - !Ref ecsInstanceProfileRole 
+
+  ecsInstancePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: 'ecsInstancePolicy'
+      Roles: 
+        - !Ref ecsInstanceProfileRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          -
+            Effect: 'Allow'
+            Action: 
+              - 's3:ListAllMyBuckets'
+            Resource: '*'

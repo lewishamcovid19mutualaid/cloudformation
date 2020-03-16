@@ -1,0 +1,108 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'creates basic vpc with subnets'
+
+Parameters:
+  PublicSubnets:
+    Type: 'CommaDelimitedList'
+    Default: '10.0.1.0/24, 10.0.2.0/24'
+
+Resources:
+
+  covidVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: 'true'
+      EnableDnsHostnames: 'true'
+      InstanceTenancy: default
+      Tags:
+       - Key: project
+         Value: lewisham-covid
+
+  publicA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref covidVpc
+      CidrBlock: !Select [0, !Ref PublicSubnets]
+      AvailabilityZone: "eu-west-1b"
+      MapPublicIpOnLaunch: 'true'
+      Tags:
+      - Key: project
+        Value: lewisham-covid
+
+  publicB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref covidVpc
+      CidrBlock: !Select [1, !Ref PublicSubnets]
+      AvailabilityZone: "eu-west-1c"
+      MapPublicIpOnLaunch: 'true'
+      Tags:
+      - Key: project
+        Value: lewisham-covid
+
+  internetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: project
+          Value: lewisham-covid
+
+  internetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref internetGateway
+      VpcId: !Ref covidVpc
+
+
+  publicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref covidVpc
+      Tags:
+        - Key: project
+          Value: lewisham-covid
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: internetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref publicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref internetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref publicRouteTable
+      SubnetId: !Ref publicA
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref publicRouteTable
+      SubnetId: !Ref publicB
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value:
+      Ref: covidVpc
+    Export:
+      Name:
+        Fn::Sub: "${AWS::StackName}-VPCID"
+  
+  PublicSubnetA:
+    Description: The subnet ID to use for public web servers
+    Value:
+      Ref: publicA
+    Export:
+      Name:
+        Fn::Sub: "${AWS::StackName}-publicA"
+  PublicSubnetB:
+    Description: The subnet ID to use for public web servers
+    Value:
+      Ref: publicB
+    Export:
+      Name:
+        Fn::Sub: "${AWS::StackName}-publicB"
