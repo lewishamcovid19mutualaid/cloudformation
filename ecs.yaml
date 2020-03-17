@@ -1,0 +1,220 @@
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'creates basic vpc with subnets'
+
+Resources:
+
+  ContainerLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: discourse
+      RetentionInDays: 7
+
+##################################
+## ECS Service and Task definition
+##################################
+  Service:
+    Type: 'AWS::ECS::Service'
+    Properties:
+      ServiceName: discourse
+      Cluster: default
+      TaskDefinition: !Ref TaskDefinition
+      DeploymentConfiguration:
+        MaximumPercent: 100
+        MinimumHealthyPercent: 0
+      DesiredCount: 1
+
+
+  TaskDefinition:
+    Type: 'AWS::ECS::TaskDefinition'
+    Properties:
+      NetworkMode: bridge
+      ExecutionRoleArn: !Ref TaskExecutionRole
+      ContainerDefinitions:
+      - Name: postgresql
+        Image: "bitnami/postgresql:11"
+        MemoryReservation: 512
+        Environment:
+          -
+            Name: ALLOW_EMPTY_PASSWORD
+            Value: no
+        Secrets:
+            - { Name: 'POSTGRESQL_ROOT_PASSWORD', ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/covid/discourse/postgres_root_password" }
+            - { Name: 'POSTGRESQL_PASSWORD', ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/covid/discourse/postgresql_password" }
+        Essential: true
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            'awslogs-region': !Ref 'AWS::Region'
+            'awslogs-group': discourse
+            'awslogs-stream-prefix': postgres
+        MountPoints:
+          -
+            SourceVolume: "postgresql_data"
+            ContainerPath: "/bitnami/postgresql/data"
+            ReadOnly: false
+      - Name: discourse
+        Image: "bitnami/discourse:2"
+        MemoryReservation: 2048
+        DependsOn:
+          - ContainerName: postgresql
+            Condition: START
+          - ContainerName: redis
+            Condition: START
+        Environment:
+          -
+            Name: POSTGRESQL_HOST
+            Value: postgresql
+          -
+            Name: POSTGRESQL_ROOT_USER
+            Value: postgres
+          -
+            Name: POSTGRESQL_CLIENT_CREATE_DATABASE_NAME
+            Value: bitnami_application
+          -
+            Name: POSTGRESQL_CLIENT_CREATE_DATABASE_USERNAME
+            Value: bn_discourse
+          -
+            Name: DISCOURSE_POSTGRESQL_NAME
+            Value: bitnami_application
+          -
+            Name: DISCOURSE_POSTGRESQL_USERNAME
+            Value: bn_discourse
+          -
+            Name: DISCOURSE_HOSTNAME
+            Value: www.example.com
+        Secrets:
+            - { Name: 'POSTGRESQL_ROOT_PASSWORD', ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/covid/discourse/postgres_root_password" }
+            - { Name: 'POSTGRESQL_CLIENT_CREATE_DATABASE_PASSWORD', ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/covid/discourse/postgres_client_create_database_password" }
+            - { Name: 'DISCOURSE_POSTGRESQL_PASSWORD', ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/covid/discourse/postgres_client_create_database_password" }
+        PortMappings:
+        - ContainerPort: 3000
+          HostPort: 80
+          Protocol: tcp
+        Essential: true
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            'awslogs-region': !Ref 'AWS::Region'
+            'awslogs-group': discourse
+            'awslogs-stream-prefix': discourse
+        MountPoints:
+          -
+            SourceVolume: "discourse_data"
+            ContainerPath: "/bitnami"
+            ReadOnly: false
+          -
+            SourceVolume: "nginx_logs"
+            ContainerPath: "/var/log/nginx"
+            ReadOnly: false
+      - Name: redis
+        Image: "bitnami/redis:5.0"
+        MemoryReservation: 512
+        Environment:
+          -
+            Name: ALLOW_EMPTY_PASSWORD
+            Value: 'yes'
+        Essential: true
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            'awslogs-region': !Ref 'AWS::Region'
+            'awslogs-group': discourse
+            'awslogs-stream-prefix': redis
+        MountPoints:
+          -
+            SourceVolume: "redis_data"
+            ContainerPath: "/bitnami"
+            ReadOnly: false
+      - Name: sidekiq
+        Image: "bitnami/discourse:2"
+        MemoryReservation: 512
+        DependsOn:
+          - ContainerName: discourse
+            Condition: START
+        Environment:
+          -
+            Name: DISCOURSE_POSTGRESQL_NAME
+            Value: bitnami_application
+          -
+            Name: DISCOURSE_POSTGRESQL_USERNAME
+            Value: bn_discourse
+          -
+            Name: DISCOURSE_HOST
+            Value: discourse
+          -
+            Name: DISCOURSE_PORT
+            Value: 3000
+          -
+            Name: DISCOURSE_HOSTNAME
+            Value: www.example.com
+        Essential: true
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            'awslogs-region': !Ref 'AWS::Region'
+            'awslogs-group': discourse
+            'awslogs-stream-prefix': redis
+        MountPoints:
+          -
+            SourceVolume: "sidekiq_data"
+            ContainerPath: "/bitnami"
+            ReadOnly: false
+      Volumes:
+        -
+          Name: discourse_data
+          Host:
+            SourcePath: "/mnt/efs/discourse/discourse_data"
+        -
+          Name: nginx_logs
+          Host:
+            SourcePath: "/mnt/efs/discourse/nginx"
+        -
+          Name: postgresql_data
+          Host:
+            SourcePath: "/mnt/efs/discourse/postgres"
+        -
+          Name: sidekiq_data
+          Host:
+            SourcePath: "/mnt/efs/discourse/sidekiq"
+        -
+          Name: redis_data
+          Host:
+            SourcePath: "/mnt/efs/discourse/redis"
+
+  TaskExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - 'ecs-tasks.amazonaws.com'
+          Action:
+          - 'sts:AssumeRole'
+      ManagedPolicyArns:
+      - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+      Policies:
+      - PolicyName: !Join
+          - '-'
+          - - "discourse"
+            - "ecsExecutionRole"
+            - !Ref "AWS::Region"
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+            - Effect: "Allow"
+              Action: "kms:Decrypt"
+              Resource: !Join
+                - ''
+                - - "arn:aws:kms:::"
+                  - !Ref "AWS::AccountId"
+                  - ":key/a37aa05f-5025-4268-996f-abc29bd4ce5e"
+            - Effect: "Allow"
+              Action:
+                - ssm:DescribeParameters
+                - ssm:GetParameters
+              Resource: "*"
+
